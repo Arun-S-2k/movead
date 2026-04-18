@@ -1,9 +1,9 @@
-﻿import { useRouter } from 'expo-router';
+import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { Alert, KeyboardAvoidingView, Platform, SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import Button from '../components/Button';
 import InputField from '../components/InputField';
-import { store } from '../constants/store';
+import { saveSession, store } from '../constants/store';
 import { supabase } from '../constants/supabase';
 import { useTheme } from '../constants/theme';
 
@@ -41,6 +41,7 @@ export default function SignUp() {
     store.name = name;
     store.mobile = mobile;
     store.email = email;
+    await saveSession();
     setLoading(false);
     router.push('/otp');
   };
@@ -66,6 +67,7 @@ export default function SignUp() {
       setLoading(false);
       return;
     }
+    store.id = data.id;
     store.name = data.name;
     store.mobile = data.mobile;
     store.email = data.email || '';
@@ -73,8 +75,9 @@ export default function SignUp() {
     store.brand = data.brand;
     store.model = data.model;
     store.fuelType = data.fuel_type;
+    await saveSession();
     setLoading(false);
-    router.push('/dashboard');
+    router.replace('/dashboard');
   };
 
   return (

@@ -1,10 +1,10 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import * as FileSystem from 'expo-file-system';
 import * as Location from 'expo-location';
 import * as MediaLibrary from 'expo-media-library';
-import { useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Image, Modal, SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import ViewShot, { captureRef } from 'react-native-view-shot';
 import { store } from '../constants/store';
 import { supabase } from '../constants/supabase';
 import { useTheme } from '../constants/theme';
@@ -13,39 +13,62 @@ const today = new Date();
 const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
 const UPLOADED_DAYS = [1,2,3,4,5,7,8,9,11,12,14,15,16,18,19,20,22,23,24,25,26];
 
-function decode(base64: string): Uint8Array {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  const lookup = new Uint8Array(256);
-  for (let i = 0; i < chars.length; i++) lookup[chars.charCodeAt(i)] = i;
-  const len = base64.length;
-  let bufferLength = Math.floor(len * 0.75);
-  if (base64[len - 1] === '=') bufferLength--;
-  if (base64[len - 2] === '=') bufferLength--;
-  const bytes = new Uint8Array(bufferLength);
-  let p = 0;
-  for (let i = 0; i < len; i += 4) {
-    const e1 = lookup[base64.charCodeAt(i)];
-    const e2 = lookup[base64.charCodeAt(i + 1)];
-    const e3 = lookup[base64.charCodeAt(i + 2)];
-    const e4 = lookup[base64.charCodeAt(i + 3)];
-    bytes[p++] = (e1 << 2) | (e2 >> 4);
-    bytes[p++] = ((e2 & 15) << 4) | (e3 >> 2);
-    bytes[p++] = ((e3 & 3) << 6) | (e4 & 63);
-  }
-  return bytes;
-}
+
 
 export default function Dashboard() {
   const t = useTheme();
   const [showCamera, setShowCamera] = useState(false);
   const [previewPhoto, setPreviewPhoto] = useState<string | null>(null);
+  const [uploadedDays, setUploadedDays] = useState<number[]>([]);
   const [photo, setPhoto] = useState<string | null>(null);
   const [showFullPhoto, setShowFullPhoto] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [photoMeta, setPhotoMeta] = useState<{ date: string; time: string; location: string; coords: string } | null>(null);
+
+  // Fetch real data on load
+  useEffect(() => {
+    if (!store.id && !store.mobile) return;
+    
+    const fetchData = async () => {
+      const year = today.getFullYear();
+      const month = today.getMonth() + 1;
+      const startOfMonth = new Date(year, month - 1, 1).toISOString();
+      const startOfNextMonth = new Date(year, month, 1).toISOString();
+
+      const { data, error } = await supabase
+        .from('photo_uploads')
+        .select('uploaded_at, photo_url, location_name, latitude, longitude')
+        .eq('mobile', store.mobile)
+        .gte('uploaded_at', startOfMonth)
+        .lt('uploaded_at', startOfNextMonth);
+
+      if (data) {
+        const days = data.map(item => new Date(item.uploaded_at).getDate());
+        setUploadedDays(Array.from(new Set(days))); // unique days
+
+        // Check if today was uploaded
+        const todayStr = today.toISOString().split('T')[0];
+        const todayUpload = data.find(item => item.uploaded_at.startsWith(todayStr));
+        if (todayUpload) {
+          setPhoto(todayUpload.photo_url);
+          const upDate = new Date(todayUpload.uploaded_at);
+          setPhotoMeta({
+            location: todayUpload.location_name || '',
+            date: upDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }),
+            time: upDate.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }),
+            coords: `${todayUpload.latitude}, ${todayUpload.longitude}`
+          });
+        }
+      } else if (error) {
+        console.error("Dashboard fetch error:", error.message);
+      }
+    };
+    fetchData();
+  }, []);
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [mediaPermission, requestMediaPermission] = MediaLibrary.usePermissions();
   const cameraRef = useRef<CameraView>(null);
+  const watermarkRef = useRef<View>(null);
 
   const handleTakePhoto = async () => {
     if (!cameraPermission?.granted) {
@@ -65,68 +88,91 @@ export default function Dashboard() {
         const now = new Date();
         const date = now.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
         const time = now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
-        let locationStr = 'Locating...';
-        let coordsStr = '';
-        try {
-          const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
-          const geo = await Location.reverseGeocodeAsync({ latitude: loc.coords.latitude, longitude: loc.coords.longitude });
-          if (geo.length > 0) locationStr = `${geo[0].district || geo[0].city}, ${geo[0].region}`;
-          coordsStr = `${loc.coords.latitude.toFixed(4)}, ${loc.coords.longitude.toFixed(4)}`;
-        } catch (e) { locationStr = 'Location unavailable'; }
-        setPhotoMeta({ date, time, location: locationStr, coords: coordsStr });
+        
+        // Show preview immediately to avoid UI delay
         setPreviewPhoto(pic.uri);
         setShowCamera(false);
+        setPhotoMeta({ date, time, location: 'Locating...', coords: 'Locating...' });
+
+        // Fetch location in the background
+        setTimeout(async () => {
+          try {
+            const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+            const geo = await Location.reverseGeocodeAsync({ latitude: loc.coords.latitude, longitude: loc.coords.longitude });
+            let locationStr = 'Location unavailable';
+            if (geo.length > 0) locationStr = `${geo[0].district || geo[0].city}, ${geo[0].region}`;
+            const coordsStr = `${loc.coords.latitude.toFixed(4)}, ${loc.coords.longitude.toFixed(4)}`;
+            setPhotoMeta(prev => prev ? { ...prev, location: locationStr, coords: coordsStr } : null);
+          } catch (e) {
+            setPhotoMeta(prev => prev ? { ...prev, location: 'Location unavailable', coords: '0.0000, 0.0000' } : null);
+          }
+        }, 50);
       }
     }
   };
 
   const confirmUpload = async () => {
-  if (previewPhoto && photoMeta) {
-    setUploading(true);
-    try {
-      const filename = `uploads/${Date.now()}.jpg`;
-      
-      const fileInfo = await FileSystem.getInfoAsync(previewPhoto);
-      if (!fileInfo.exists) {
-        Alert.alert('Error', 'Photo file not found');
-        setUploading(false);
+    if (previewPhoto && photoMeta) {
+      if (photoMeta.coords === 'Locating...') {
+        Alert.alert('Please wait', 'Still acquiring location details...');
         return;
       }
+      setUploading(true);
+      try {
+        // Step 1: Capture the watermarked view as an image
+        const watermarkedUri = await captureRef(watermarkRef, {
+          format: 'jpg',
+          quality: 0.9,
+        });
 
-      const base64 = await FileSystem.readAsStringAsync(previewPhoto, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
+        const filename = `uploads/${store.mobile || 'unknown'}_${Date.now()}.jpg`;
 
-      const { error: storageError } = await supabase.storage
-        .from('photos')
-        .upload(filename, decode(base64), { contentType: 'image/jpeg' });
+        // Step 2: Upload the watermarked image
+        const response = await fetch(watermarkedUri);
+        const arrayBuffer = await response.arrayBuffer();
 
-      if (storageError) {
-        Alert.alert('Upload failed', storageError.message);
-        setUploading(false);
-        return;
+        const { error: storageError } = await supabase.storage
+          .from('Photos')
+          .upload(filename, arrayBuffer, { contentType: 'image/jpeg' });
+
+        if (storageError) {
+          Alert.alert('Upload failed', storageError.message);
+          setUploading(false);
+          return;
+        }
+
+        const { data: urlData } = supabase.storage.from('Photos').getPublicUrl(filename);
+        const coords = photoMeta.coords.split(',');
+
+        const { error: dbError } = await supabase.from('photo_uploads').insert({
+          photo_url: urlData.publicUrl,
+          latitude: parseFloat(coords[0]),
+          longitude: parseFloat(coords[1]),
+          location_name: photoMeta.location,
+          uploaded_at: new Date().toISOString(),
+          driver_id: store.id || null,
+          driver_name: store.name || null,
+          vehicle_number: store.vehicleNumber || null,
+          mobile: store.mobile || null,
+        });
+
+        if (dbError) {
+          Alert.alert('Database Error', 'Uploaded to storage but failed to save in database: ' + dbError.message);
+          setUploading(false);
+          return;
+        }
+
+        setUploadedDays(prev => Array.from(new Set([...prev, new Date().getDate()])));
+
+        await MediaLibrary.saveToLibraryAsync(watermarkedUri);
+        setPhoto(watermarkedUri);
+        setPreviewPhoto(null);
+      } catch (e: any) {
+        Alert.alert('Error', e.message || JSON.stringify(e));
       }
-
-      const { data: urlData } = supabase.storage.from('photos').getPublicUrl(filename);
-      const coords = photoMeta.coords.split(',');
-
-      await supabase.from('photo_uploads').insert({
-        photo_url: urlData.publicUrl,
-        latitude: parseFloat(coords[0]),
-        longitude: parseFloat(coords[1]),
-        location_name: photoMeta.location,
-        uploaded_at: new Date().toISOString(),
-      });
-
-      await MediaLibrary.saveToLibraryAsync(previewPhoto);
-      setPhoto(previewPhoto);
-      setPreviewPhoto(null);
-    } catch (e: any) {
-      Alert.alert('Error', e.message || JSON.stringify(e));
+      setUploading(false);
     }
-    setUploading(false);
-  }
-};
+  };
   const retakePhoto = () => {
     setPreviewPhoto(null);
     setShowCamera(true);
@@ -156,26 +202,52 @@ export default function Dashboard() {
     );
   }
 
+  // Build the diagonal watermark text
+  const watermarkLine1 = `MoveAd • ${driverName} • ${vehicleNo}`;
+  const watermarkLine2 = `${photoMeta?.location || ''}`;
+  const watermarkLine3 = `${photoMeta?.date || ''} ${photoMeta?.time || ''}`;
+  const watermarkLine4 = `${photoMeta?.coords || ''}`;
+
   if (previewPhoto) {
     return (
       <SafeAreaView style={{ flex: 1, backgroundColor: '#000' }}>
-        <View style={{ flex: 1 }}>
-          <Image source={{ uri: previewPhoto }} style={{ flex: 1 }} resizeMode="cover" />
-          <View style={styles.metaOverlay}>
-            <Text style={styles.metaText}>📍 {photoMeta?.location}</Text>
-            <Text style={styles.metaText}>🕐 {photoMeta?.date} {photoMeta?.time}</Text>
-            <Text style={styles.metaText}>🌐 {photoMeta?.coords}</Text>
-            <Text style={styles.metaWatermark}>MoveAd • {driverName} • {vehicleNo}</Text>
+        {/* Use ViewShot component wrapper for reliable Android capture */}
+        <ViewShot ref={watermarkRef} options={{ format: 'jpg', quality: 0.9 }} style={{ flex: 1, backgroundColor: '#000' }}>
+          <Image source={{ uri: previewPhoto }} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+          
+          {/* Diagonal watermark overlay */}
+          <View style={styles.diagonalWatermarkContainer} pointerEvents="none">
+            {/* 2 diagonal watermarks: top-middle and bottom-middle */}
+            {[1, 3].map((row) => (
+              <View key={row} style={[styles.diagonalRow, { top: `${row * 25}%` }]}>
+                <View style={styles.diagonalTextBlock}>
+                  <Text style={styles.diagonalText}>{watermarkLine1}</Text>
+                  <Text style={styles.diagonalTextSmall}>{watermarkLine2}</Text>
+                  <Text style={styles.diagonalTextSmall}>{watermarkLine3} • {watermarkLine4}</Text>
+                </View>
+              </View>
+            ))}
           </View>
-        </View>
+        </ViewShot>
         <View style={styles.previewActions}>
           <TouchableOpacity style={styles.retakeBtn} onPress={retakePhoto} disabled={uploading}>
             <MaterialCommunityIcons name="camera-retake" size={20} color="#888" />
             <Text style={styles.retakeBtnText}>Retake</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.confirmBtn} onPress={confirmUpload} disabled={uploading}>
-            <MaterialCommunityIcons name="check" size={22} color="#fff" />
-            <Text style={styles.confirmBtnText}>{uploading ? 'Uploading...' : 'Upload'}</Text>
+          <TouchableOpacity 
+            style={[
+              styles.confirmBtn, 
+              (uploading || photoMeta?.coords === 'Locating...') && { opacity: 0.6 }
+            ]} 
+            onPress={confirmUpload} 
+            disabled={uploading || photoMeta?.coords === 'Locating...'}
+          >
+            {(!uploading && photoMeta?.coords !== 'Locating...') && (
+              <MaterialCommunityIcons name="check" size={22} color="#fff" />
+            )}
+            <Text style={styles.confirmBtnText}>
+              {photoMeta?.coords === 'Locating...' ? 'Locating...' : uploading ? 'Uploading...' : 'Upload'}
+            </Text>
           </TouchableOpacity>
         </View>
       </SafeAreaView>
@@ -228,12 +300,6 @@ export default function Dashboard() {
             {photo ? (
               <View style={{ width: '100%', height: '100%' }}>
                 <Image source={{ uri: photo }} style={styles.previewImage} />
-                <View style={styles.metaOverlay}>
-                  <Text style={styles.metaText}>📍 {photoMeta?.location}</Text>
-                  <Text style={styles.metaText}>🕐 {photoMeta?.date} {photoMeta?.time}</Text>
-                  <Text style={styles.metaText}>🌐 {photoMeta?.coords}</Text>
-                  <Text style={styles.metaWatermark}>MoveAd • {driverName} • {vehicleNo}</Text>
-                </View>
                 <View style={styles.tapHint}>
                   <MaterialCommunityIcons name="magnify-plus" size={16} color="#fff" />
                   <Text style={styles.tapHintText}>Tap to view</Text>
@@ -283,7 +349,7 @@ export default function Dashboard() {
           <View style={styles.heatmap}>
             {Array.from({ length: daysInMonth }, (_, i) => {
               const day = i + 1;
-              const uploaded = UPLOADED_DAYS.includes(day);
+              const uploaded = uploadedDays.includes(day);
               const isToday = day === today.getDate();
               const isFuture = day > today.getDate();
               return (
@@ -357,6 +423,11 @@ const styles = StyleSheet.create({
   metaOverlay: { position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: 'rgba(0,0,0,0.65)', padding: 8 },
   metaText: { color: '#fff', fontSize: 10, marginBottom: 2 },
   metaWatermark: { color: '#E05409', fontSize: 10, fontWeight: 'bold', marginTop: 2 },
+  diagonalWatermarkContainer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, overflow: 'hidden' },
+  diagonalRow: { position: 'absolute', left: -40, right: -40, alignItems: 'center', transform: [{ rotate: '-30deg' }] },
+  diagonalTextBlock: { alignItems: 'center', paddingVertical: 4, backgroundColor: 'rgba(0,0,0,0.15)', paddingHorizontal: 100, borderRadius: 10 },
+  diagonalText: { color: 'rgba(255,255,255,0.85)', fontSize: 13, fontWeight: 'bold', textAlign: 'center', letterSpacing: 0.5, textShadowColor: 'black', textShadowRadius: 3, textShadowOffset: { width: 1, height: 1 } },
+  diagonalTextSmall: { color: 'rgba(255,255,255,0.7)', fontSize: 10, textAlign: 'center', marginTop: 1, textShadowColor: 'black', textShadowRadius: 2, textShadowOffset: { width: 1, height: 1 } },
   tapHint: { position: 'absolute', top: 8, right: 8, flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: 'rgba(0,0,0,0.5)', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
   tapHintText: { color: '#fff', fontSize: 10 },
   uploadStatus: { fontSize: 14, fontWeight: '500' },
@@ -370,7 +441,7 @@ const styles = StyleSheet.create({
   previewActions: { flexDirection: 'row', padding: 20, gap: 12, backgroundColor: '#000' },
   retakeBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 14, borderRadius: 12, borderWidth: 1, borderColor: '#333' },
   retakeBtnText: { color: '#888', fontSize: 15 },
-  confirmBtn: { flex: 2, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 14, borderRadius: 12, backgroundColor: '#E05409' },
+  confirmBtn: { flex: 2, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 14, borderRadius: 12, backgroundColor: '#22C55E' },
   confirmBtnText: { color: '#fff', fontSize: 15, fontWeight: 'bold' },
   closeBtn: { position: 'absolute', top: 50, right: 20, zIndex: 10, backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 20, padding: 8 },
   fullPhotoMeta: { backgroundColor: '#111', padding: 20 },

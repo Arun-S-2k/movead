@@ -1,8 +1,8 @@
-﻿import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { Modal, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
-import { store } from '../constants/store';
+import { saveSession, store } from '../constants/store';
 import { useTheme } from '../constants/theme';
 
 const BRANDS = ['Bajaj', 'TVS', 'Piaggio', 'Mahindra', 'Atul'];
@@ -31,11 +31,12 @@ export default function Vehicle() {
   const router = useRouter();
   const t = useTheme();
 
-  const handleContinue = () => {
+  const handleContinue = async () => {
     store.vehicleNumber = regNo;
     store.brand = brand;
     store.model = model;
     store.fuelType = fuel;
+    await saveSession();
     router.push('/personal');
   };
 

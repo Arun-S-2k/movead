@@ -1,11 +1,11 @@
-﻿import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
 import { Alert, Image, SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import Button from '../components/Button';
 import InputField from '../components/InputField';
-import { store } from '../constants/store';
+import { saveSession, store } from '../constants/store';
 import { supabase } from '../constants/supabase';
 import { useTheme } from '../constants/theme';
 
@@ -71,13 +71,13 @@ export default function Personal() {
     if (profilePhoto) {
       try {
         const response = await fetch(profilePhoto);
-        const blob = await response.blob();
+        const arrayBuffer = await response.arrayBuffer();
         const filename = `profiles/${store.mobile}_${Date.now()}.jpg`;
         const { error: uploadError } = await supabase.storage
-          .from('photos')
-          .upload(filename, blob, { contentType: 'image/jpeg' });
+          .from('Photos')
+          .upload(filename, arrayBuffer, { contentType: 'image/jpeg' });
         if (!uploadError) {
-          const { data: urlData } = supabase.storage.from('photos').getPublicUrl(filename);
+          const { data: urlData } = supabase.storage.from('Photos').getPublicUrl(filename);
           profilePhotoUrl = urlData.publicUrl;
         }
       } catch (e) {
@@ -85,7 +85,7 @@ export default function Personal() {
       }
     }
 
-    const { error } = await supabase.from('drivers').insert({
+    const { data: driverData, error } = await supabase.from('drivers').insert({
       name,
       gender,
       ownership,
@@ -96,16 +96,18 @@ export default function Personal() {
       fuel_type: store.fuelType,
       email: store.email,
       profile_photo_url: profilePhotoUrl,
-    });
+    }).select().single();
 
     if (error) {
       Alert.alert('Error', error.message);
       setLoading(false);
       return;
     }
+    if (driverData?.id) store.id = driverData.id;
     store.name = name;
+    await saveSession();
     setLoading(false);
-    router.push('/dashboard');
+    router.replace('/dashboard');
   };
 
   return (
