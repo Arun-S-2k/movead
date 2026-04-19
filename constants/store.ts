@@ -13,9 +13,14 @@ export const store: Record<string, any> = {
   fuelType: '',
 };
 
+// Simple auth state listener so _layout can react to login/logout
+let _authListener: ((loggedIn: boolean) => void) | null = null;
+export const setAuthListener = (cb: (loggedIn: boolean) => void) => { _authListener = cb; };
+
 export const saveSession = async () => {
   try {
     await AsyncStorage.setItem(STORE_KEY, JSON.stringify(store));
+    _authListener?.(!!store.id);
   } catch (e) {
     console.log('Failed to save session', e);
   }
@@ -46,6 +51,7 @@ export const clearSession = async () => {
     store.model = '';
     store.fuelType = '';
     await AsyncStorage.removeItem(STORE_KEY);
+    _authListener?.(false);
   } catch (e) {
     console.log('Failed to clear session', e);
   }

@@ -1,6 +1,6 @@
 import { Stack, useRouter, useSegments } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { loadSession } from '../constants/store';
+import { loadSession, setAuthListener } from '../constants/store';
 
 export default function Layout() {
   const [ready, setReady] = useState(false);
@@ -15,6 +15,11 @@ export default function Layout() {
       setReady(true);
     };
     init();
+
+    // Listen for login/logout events
+    setAuthListener((isLoggedIn) => {
+      setLoggedIn(isLoggedIn);
+    });
   }, []);
 
   useEffect(() => {
@@ -22,6 +27,9 @@ export default function Layout() {
     const currentRoute = String(segments[0] || '');
     if (loggedIn && (currentRoute === '' || currentRoute === 'index' || currentRoute === '(index)')) {
       router.replace('/dashboard');
+    }
+    if (!loggedIn && currentRoute === 'dashboard') {
+      router.replace('/');
     }
   }, [ready, loggedIn, segments]);
 

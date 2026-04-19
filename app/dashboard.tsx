@@ -3,20 +3,32 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as Location from 'expo-location';
 import * as MediaLibrary from 'expo-media-library';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useFocusEffect } from '@react-navigation/native';
+import { useRouter } from 'expo-router';
 import { Alert, Image, Modal, SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import ViewShot, { captureRef } from 'react-native-view-shot';
-import { store } from '../constants/store';
+import TabBar from '../components/TabBar';
+import { clearSession, store } from '../constants/store';
 import { supabase } from '../constants/supabase';
 import { useTheme } from '../constants/theme';
 
 const today = new Date();
-const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
-const UPLOADED_DAYS = [1,2,3,4,5,7,8,9,11,12,14,15,16,18,19,20,22,23,24,25,26];
+const currentYear = today.getFullYear();
+const currentMonth = today.getMonth();
+
+const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
+const firstDayOfMonth = new Date(currentYear, currentMonth, 1).getDay();
+const daysInPrevMonth = new Date(currentYear, currentMonth, 0).getDate();
+
+const totalCells = firstDayOfMonth + daysInMonth;
+const rowsNeeded = Math.ceil(totalCells / 7);
+const nextMonthDaysCount = (rowsNeeded * 7) - totalCells;
 
 
 
 export default function Dashboard() {
   const t = useTheme();
+  const router = useRouter();
   const [showCamera, setShowCamera] = useState(false);
   const [previewPhoto, setPreviewPhoto] = useState<string | null>(null);
   const [uploadedDays, setUploadedDays] = useState<number[]>([]);
@@ -24,47 +36,89 @@ export default function Dashboard() {
   const [showFullPhoto, setShowFullPhoto] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [photoMeta, setPhotoMeta] = useState<{ date: string; time: string; location: string; coords: string } | null>(null);
+  const [driverId, setDriverId] = useState<string | null>(null);
+  const [monthUploads, setMonthUploads] = useState<any[]>([]);
+  const [historyPhoto, setHistoryPhoto] = useState<{ photo_url: string; meta: any } | null>(null);
 
-  // Fetch real data on load
-  useEffect(() => {
-    if (!store.id && !store.mobile) return;
-    
-    const fetchData = async () => {
-      const year = today.getFullYear();
-      const month = today.getMonth() + 1;
-      const startOfMonth = new Date(year, month - 1, 1).toISOString();
-      const startOfNextMonth = new Date(year, month, 1).toISOString();
+  // Fetch driver record and real upload data on every screen focus
+  useFocusEffect(
+    useCallback(() => {
+      if (!store.mobile) return;
 
-      const { data, error } = await supabase
-        .from('photo_uploads')
-        .select('uploaded_at, photo_url, location_name, latitude, longitude')
-        .eq('mobile', store.mobile)
-        .gte('uploaded_at', startOfMonth)
-        .lt('uploaded_at', startOfNextMonth);
+      const fetchData = async () => {
+        // Step 1: Get driver record from drivers table using mobile number
+        const { data: driverData, error: driverError } = await supabase
+          .from('drivers')
+          .select('id')
+          .eq('mobile', store.mobile)
+          .single();
 
-      if (data) {
-        const days = data.map(item => new Date(item.uploaded_at).getDate());
-        setUploadedDays(Array.from(new Set(days))); // unique days
-
-        // Check if today was uploaded
-        const todayStr = today.toISOString().split('T')[0];
-        const todayUpload = data.find(item => item.uploaded_at.startsWith(todayStr));
-        if (todayUpload) {
-          setPhoto(todayUpload.photo_url);
-          const upDate = new Date(todayUpload.uploaded_at);
-          setPhotoMeta({
-            location: todayUpload.location_name || '',
-            date: upDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }),
-            time: upDate.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }),
-            coords: `${todayUpload.latitude}, ${todayUpload.longitude}`
-          });
+        if (driverError || !driverData) {
+          console.error('[Dashboard] Failed to fetch driver record:', driverError?.message);
+          return;
         }
-      } else if (error) {
-        console.error("Dashboard fetch error:", error.message);
-      }
-    };
-    fetchData();
-  }, []);
+
+        const fetchedDriverId = driverData.id;
+        setDriverId(fetchedDriverId);
+
+        // Step 2: Query photo_uploads for this driver in the current month
+        const now = new Date();
+        const year = now.getFullYear();
+        const month = now.getMonth() + 1;
+        const startOfMonth = new Date(year, month - 1, 1).toISOString();
+        const startOfNextMonth = new Date(year, month, 1).toISOString();
+
+        // Try querying by driver_id with date filter
+        let { data, error } = await supabase
+          .from('photo_uploads')
+          .select('uploaded_at, photo_url, location_name, latitude, longitude')
+          .eq('driver_id', fetchedDriverId)
+          .gte('uploaded_at', startOfMonth)
+          .lt('uploaded_at', startOfNextMonth);
+
+        // Fallback: if no results by driver_id, try by mobile
+        if ((!data || data.length === 0) && store.mobile) {
+          const fallback = await supabase
+            .from('photo_uploads')
+            .select('uploaded_at, photo_url, location_name, latitude, longitude')
+            .eq('mobile', store.mobile)
+            .gte('uploaded_at', startOfMonth)
+            .lt('uploaded_at', startOfNextMonth);
+          data = fallback.data;
+          error = fallback.error;
+        }
+
+        if (data && data.length > 0) {
+          setMonthUploads(data);
+          // Extract unique day numbers for the heatmap (use local date)
+          const days = data.map(item => new Date(item.uploaded_at).getDate());
+          setUploadedDays(Array.from(new Set(days)));
+
+          // Check if today's photo was already uploaded — compare using local date parts
+          const todayDate = now.getDate();
+          const todayMonth = now.getMonth();
+          const todayYear = now.getFullYear();
+          const todayUpload = data.find(item => {
+            const d = new Date(item.uploaded_at);
+            return d.getDate() === todayDate && d.getMonth() === todayMonth && d.getFullYear() === todayYear;
+          });
+          if (todayUpload) {
+            setPhoto(todayUpload.photo_url);
+            const upDate = new Date(todayUpload.uploaded_at);
+            setPhotoMeta({
+              location: todayUpload.location_name || '',
+              date: upDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }),
+              time: upDate.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }),
+              coords: `${todayUpload.latitude}, ${todayUpload.longitude}`
+            });
+          }
+        } else if (error) {
+          console.error('[Dashboard] Fetch error:', error.message);
+        }
+      };
+      fetchData();
+    }, [])
+  );
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [mediaPermission, requestMediaPermission] = MediaLibrary.usePermissions();
   const cameraRef = useRef<CameraView>(null);
@@ -150,7 +204,7 @@ export default function Dashboard() {
           longitude: parseFloat(coords[1]),
           location_name: photoMeta.location,
           uploaded_at: new Date().toISOString(),
-          driver_id: store.id || null,
+          driver_id: driverId,
           driver_name: store.name || null,
           vehicle_number: store.vehicleNumber || null,
           mobile: store.mobile || null,
@@ -254,19 +308,23 @@ export default function Dashboard() {
     );
   }
 
+  const activeModalPhotoUrl = historyPhoto ? historyPhoto.photo_url : photo;
+  const activeModalMeta = historyPhoto ? historyPhoto.meta : photoMeta;
+  const isModalVisible = showFullPhoto || !!historyPhoto;
+
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: t.surface }}>
-      <Modal visible={showFullPhoto} transparent animationType="fade">
+      <Modal visible={isModalVisible} transparent animationType="fade">
         <SafeAreaView style={{ flex: 1, backgroundColor: '#000' }}>
-          <TouchableOpacity style={styles.closeBtn} onPress={() => setShowFullPhoto(false)}>
+          <TouchableOpacity style={styles.closeBtn} onPress={() => { setShowFullPhoto(false); setHistoryPhoto(null); }}>
             <MaterialCommunityIcons name="close" size={24} color="#fff" />
           </TouchableOpacity>
-          <Image source={{ uri: photo! }} style={{ flex: 1 }} resizeMode="contain" />
+          {activeModalPhotoUrl && <Image source={{ uri: activeModalPhotoUrl }} style={{ flex: 1 }} resizeMode="contain" />}
           <View style={styles.fullPhotoMeta}>
             <Text style={styles.fullPhotoTitle}>Photo Details</Text>
-            <Text style={styles.fullPhotoDetail}>📍 {photoMeta?.location}</Text>
-            <Text style={styles.fullPhotoDetail}>🕐 {photoMeta?.date} {photoMeta?.time}</Text>
-            <Text style={styles.fullPhotoDetail}>🌐 {photoMeta?.coords}</Text>
+            <Text style={styles.fullPhotoDetail}>📍 {activeModalMeta?.location}</Text>
+            <Text style={styles.fullPhotoDetail}>🕐 {activeModalMeta?.date} {activeModalMeta?.time}</Text>
+            <Text style={styles.fullPhotoDetail}>🌐 {activeModalMeta?.coords}</Text>
             <Text style={styles.fullPhotoWatermark}>MoveAd • {driverName} • {vehicleNo}</Text>
           </View>
         </SafeAreaView>
@@ -275,9 +333,6 @@ export default function Dashboard() {
       <ScrollView contentContainerStyle={styles.container}>
         <View style={styles.header}>
           <View style={styles.profileRow}>
-            <View style={[styles.avatarCircle, { backgroundColor: t.border }]}>
-              <MaterialCommunityIcons name="account" size={28} color={t.textMuted} />
-            </View>
             <View>
               <Text style={[styles.driverName, { color: t.text }]}>{driverName}</Text>
               <Text style={[styles.vehicleNo, { color: t.textMuted }]}>{vehicleNo}</Text>
@@ -347,22 +402,68 @@ export default function Dashboard() {
             ))}
           </View>
           <View style={styles.heatmap}>
+            {/* Previous month trailing dates */}
+            {Array.from({ length: firstDayOfMonth }, (_, i) => {
+              const prevDay = daysInPrevMonth - firstDayOfMonth + i + 1;
+              return (
+                <View key={`prev-${i}`} style={[styles.heatmapCell, { backgroundColor: 'transparent' }]}>
+                  <Text style={{ fontSize: 10, color: t.textMuted }}>{prevDay}</Text>
+                </View>
+              );
+            })}
+            
+            {/* Current month dates */}
             {Array.from({ length: daysInMonth }, (_, i) => {
               const day = i + 1;
               const uploaded = uploadedDays.includes(day);
               const isToday = day === today.getDate();
               const isFuture = day > today.getDate();
+              
+              const handlePress = () => {
+                if (uploaded) {
+                  const upload = monthUploads.find(item => new Date(item.uploaded_at).getDate() === day);
+                  if (upload) {
+                    const upDate = new Date(upload.uploaded_at);
+                    setHistoryPhoto({
+                      photo_url: upload.photo_url,
+                      meta: {
+                        location: upload.location_name || '',
+                        date: upDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }),
+                        time: upDate.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }),
+                        coords: `${upload.latitude}, ${upload.longitude}`
+                      }
+                    });
+                  }
+                }
+              };
+              
+              const CellWrapper = uploaded ? TouchableOpacity : View;
+
               return (
-                <View key={day} style={[
-                  styles.heatmapCell,
-                  { backgroundColor: isFuture ? t.surface : uploaded ? '#22C55E' : '#EF444420' },
-                  isToday && { borderWidth: 2, borderColor: t.brand },
-                ]}>
+                <CellWrapper 
+                  key={day} 
+                  style={[
+                    styles.heatmapCell,
+                    { backgroundColor: isFuture ? t.surface : uploaded ? '#22C55E' : '#EF444420' },
+                    isToday && { borderWidth: 2, borderColor: '#E05409' }, // Matches orange border in mockup
+                  ]}
+                  onPress={uploaded ? handlePress : undefined}
+                >
                   <Text style={{
                     fontSize: 10,
                     fontWeight: isToday ? 'bold' : 'normal',
                     color: isFuture ? t.textMuted : uploaded ? '#fff' : '#EF4444',
                   }}>{day}</Text>
+                </CellWrapper>
+              );
+            })}
+
+            {/* Next month leading dates */}
+            {Array.from({ length: nextMonthDaysCount }, (_, i) => {
+              const nextDay = i + 1;
+              return (
+                <View key={`next-${i}`} style={[styles.heatmapCell, { backgroundColor: 'transparent' }]}>
+                  <Text style={{ fontSize: 10, color: t.textMuted }}>{nextDay}</Text>
                 </View>
               );
             })}
@@ -384,24 +485,7 @@ export default function Dashboard() {
         </View>
       </ScrollView>
 
-      <View style={[styles.tabBar, { backgroundColor: t.card, borderTopColor: t.border }]}>
-        <TouchableOpacity style={styles.tabItem}>
-          <MaterialCommunityIcons name="home" size={24} color={t.brand} />
-          <Text style={[styles.tabLabelActive, { color: t.brand }]}>Home</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.tabItem}>
-          <MaterialCommunityIcons name="bullhorn-outline" size={24} color={t.textMuted} />
-          <Text style={[styles.tabLabel, { color: t.textMuted }]}>My Ads</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.tabItem}>
-          <MaterialCommunityIcons name="wallet-outline" size={24} color={t.textMuted} />
-          <Text style={[styles.tabLabel, { color: t.textMuted }]}>Wallet</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.tabItem}>
-          <MaterialCommunityIcons name="account-outline" size={24} color={t.textMuted} />
-          <Text style={[styles.tabLabel, { color: t.textMuted }]}>Profile</Text>
-        </TouchableOpacity>
-      </View>
+      <TabBar activeTab="home" />
     </SafeAreaView>
   );
 }
@@ -448,8 +532,8 @@ const styles = StyleSheet.create({
   fullPhotoTitle: { color: '#fff', fontSize: 14, fontWeight: 'bold', marginBottom: 8 },
   fullPhotoDetail: { color: '#aaa', fontSize: 13, marginBottom: 4 },
   fullPhotoWatermark: { color: '#E05409', fontSize: 13, fontWeight: 'bold', marginTop: 4 },
-  heatmap: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginBottom: 4 },
-  heatmapCell: { width: 34, height: 34, borderRadius: 6, alignItems: 'center', justifyContent: 'center' },
+  heatmap: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', marginBottom: 4, width: '100%' },
+  heatmapCell: { width: '13%', aspectRatio: 1, borderRadius: 6, alignItems: 'center', justifyContent: 'center', marginBottom: 6 },
   legendRow: { flexDirection: 'row', gap: 16, marginTop: 12 },
   legendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   legendDot: { width: 10, height: 10, borderRadius: 5 },

@@ -1,31 +1,69 @@
 import { useColorScheme } from 'react-native';
+import { useEffect, useState } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export const Colors = {
   light: {
     background: '#FFFFFF',
-    surface: '#F3F4F6',
+    surface: '#F4F4F5',
     card: '#FFFFFF',
-    text: '#111111',
-    textSecondary: '#555555',
-    textMuted: '#888888',
-    border: '#E5E7EB',
-    inputBg: '#FAFAFA',
+    text: '#09090B',
+    textSecondary: '#52525B',
+    textMuted: '#71717A',
+    border: '#E4E4E7',
+    inputBg: '#F4F4F5',
     brand: '#E05409',
   },
   dark: {
-    background: '#121212',
-    surface: '#1E1E1E',
-    card: '#242424',
-    text: '#F0F0F0',
-    textSecondary: '#BBBBBB',
-    textMuted: '#888888',
-    border: '#2E2E2E',
-    inputBg: '#1E1E1E',
+    background: '#09090B',
+    surface: '#18181B',
+    card: '#18181B',
+    text: '#FAFAFA',
+    textSecondary: '#A1A1AA',
+    textMuted: '#71717A',
+    border: '#27272A',
+    inputBg: '#27272A',
     brand: '#E05409',
   },
 };
 
+export type ThemePreference = 'system' | 'light' | 'dark';
+
+let currentPref: ThemePreference = 'system';
+const themeSubscribers = new Set<(pref: ThemePreference) => void>();
+
+export const getThemePreference = async (): Promise<ThemePreference> => {
+  const saved = await AsyncStorage.getItem('theme_pref');
+  return (saved as ThemePreference) || 'system';
+};
+
+// Removed top-level initialization to prevent window is not defined error
+
+export const setThemePreference = async (pref: ThemePreference) => {
+  currentPref = pref;
+  themeSubscribers.forEach(cb => cb(pref)); // Synchronously notify components
+  await AsyncStorage.setItem('theme_pref', pref);
+};
+
 export function useTheme() {
-  const scheme = useColorScheme();
-  return scheme === 'dark' ? Colors.dark : Colors.light;
-}
+  const systemScheme = useColorScheme();
+  const [pref, setPref] = useState<ThemePreference>(currentPref);
+
+  useEffect(() => {
+    const load = async () => {
+       const saved = await getThemePreference();
+       currentPref = saved;
+       setPref(saved);
+    };
+    load();
+    
+    const sub = (newPref: ThemePreference) => {
+      setPref(newPref);
+    };
+    themeSubscribers.add(sub);
+    return () => themeSubscribers.delete(sub);
+  }, []);
+
+  const activeScheme = pref === 'system' ? systemScheme : pref;
+  return activeScheme === 'dark' ? Colors.dark : Colors.light;
+}
