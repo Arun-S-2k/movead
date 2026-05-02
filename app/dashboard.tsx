@@ -5,7 +5,7 @@ import * as MediaLibrary from 'expo-media-library';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import { useRouter } from 'expo-router';
-import { Alert, Image, Modal, SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Alert, Image, Modal, SafeAreaView, ScrollView, StyleSheet, Text, TouchableOpacity, View, RefreshControl } from 'react-native';
 import ViewShot, { captureRef } from 'react-native-view-shot';
 import TabBar from '../components/TabBar';
 import { clearSession, store } from '../constants/store';
@@ -39,19 +39,54 @@ export default function Dashboard() {
   const [driverId, setDriverId] = useState<string | null>(null);
   const [monthUploads, setMonthUploads] = useState<any[]>([]);
   const [historyPhoto, setHistoryPhoto] = useState<{ photo_url: string; meta: any } | null>(null);
+  const [showAdModal, setShowAdModal] = useState(false);
+  const [activeCampaign, setActiveCampaign] = useState<any>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
-  // Fetch driver record and real upload data on every screen focus
-  useFocusEffect(
-    useCallback(() => {
-      if (!store.mobile) return;
+  const payoutPerMonth = 300;
+  const payoutPerWeek = payoutPerMonth / 4;
 
-      const fetchData = async () => {
-        // Step 1: Get driver record from drivers table using mobile number
-        const { data: driverData, error: driverError } = await supabase
-          .from('drivers')
-          .select('id')
-          .eq('mobile', store.mobile)
-          .single();
+  let currentAd: any = null;
+  if (activeCampaign && activeCampaign.campaigns) {
+    const sDate = new Date(activeCampaign.assigned_on || activeCampaign.campaigns.start_date);
+    const eDate = new Date(activeCampaign.expected_end || activeCampaign.campaigns.end_date);
+    const formatDate = (d: Date) => d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+    
+    // dynamically handle payout
+    let payoutText = `₹${payoutPerMonth} / month`;
+    let splitText = `₹${payoutPerWeek} / week`;
+
+    if (activeCampaign.payment_amount) {
+      if (activeCampaign.payout_frequency === 'Weekly') {
+        payoutText = `₹${activeCampaign.payment_amount} / week`;
+        splitText = `₹${(activeCampaign.payment_amount / 7).toFixed(0)} / day`;
+      } else {
+        payoutText = `₹${activeCampaign.payment_amount} / month`;
+        splitText = `₹${(activeCampaign.payment_amount / 4).toFixed(0)} / week`;
+      }
+    }
+
+    currentAd = {
+      advertiser: activeCampaign.campaigns.advertiser || 'Unknown Advertiser',
+      title: activeCampaign.campaigns.name || 'Ad Campaign',
+      tenure: `${formatDate(sDate)} - ${formatDate(eDate)}`,
+      payout: payoutText,
+      payoutSplit: splitText,
+      image: 'https://images.unsplash.com/photo-1611591437281-460bfbe1220a?q=80&w=800&h=200&fit=crop',
+      dimensions: '60cm x 15cm sticker',
+      description: 'Please ensure the sticker remains clean and visible at all times. Upload daily photos to receive your payout.',
+    };
+  }
+
+  const fetchData = async () => {
+    if (!store.mobile) return;
+    try {
+      // Step 1: Get driver record from drivers table using mobile number
+      const { data: driverData, error: driverError } = await supabase
+        .from('drivers')
+        .select('id')
+        .eq('mobile', store.mobile)
+        .single();
 
         if (driverError || !driverData) {
           console.error('[Dashboard] Failed to fetch driver record:', driverError?.message);
@@ -88,6 +123,20 @@ export default function Dashboard() {
           error = fallback.error;
         }
 
+        // Step 3: Fetch active campaign for driver
+        const { data: campaignData } = await supabase
+          .from('driver_campaigns')
+          .select('*, campaigns(*)')
+          .eq('driver_id', fetchedDriverId)
+          .eq('status', 'active')
+          .maybeSingle();
+
+        if (campaignData && campaignData.campaigns) {
+          setActiveCampaign(campaignData);
+        } else {
+          setActiveCampaign(null);
+        }
+
         if (data && data.length > 0) {
           setMonthUploads(data);
           // Extract unique day numbers for the heatmap (use local date)
@@ -115,10 +164,22 @@ export default function Dashboard() {
         } else if (error) {
           console.error('[Dashboard] Fetch error:', error.message);
         }
-      };
+    } catch (e) {
+      console.error('[Dashboard] Error in fetch:', e);
+    }
+  };
+
+  useFocusEffect(
+    useCallback(() => {
       fetchData();
     }, [])
   );
+
+  const onRefresh = async () => {
+    setRefreshing(true);
+    await fetchData();
+    setRefreshing(false);
+  };
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [mediaPermission, requestMediaPermission] = MediaLibrary.usePermissions();
   const cameraRef = useRef<CameraView>(null);
@@ -330,7 +391,53 @@ export default function Dashboard() {
         </SafeAreaView>
       </Modal>
 
-      <ScrollView contentContainerStyle={styles.container}>
+      {/* Advertisement Details Modal */}
+      {currentAd && (
+        <Modal visible={showAdModal} transparent animationType="slide">
+          <SafeAreaView style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.85)' }}>
+            <View style={[styles.adModalContent, { backgroundColor: t.surface }]}>
+              <View style={styles.adModalHeader}>
+                <Text style={[styles.adModalTitle, { color: t.text }]}>Campaign Details</Text>
+                <TouchableOpacity onPress={() => setShowAdModal(false)}>
+                  <MaterialCommunityIcons name="close-circle" size={32} color={t.textMuted} />
+                </TouchableOpacity>
+              </View>
+              
+              <ScrollView showsVerticalScrollIndicator={false}>
+                {/* Aspect ratio 4:1 for 60x15cm */}
+                <View style={styles.adFullImageContainer}>
+                  <Image source={{ uri: currentAd.image }} style={styles.adFullImage} resizeMode="cover" />
+                  <View style={styles.adDimensionsBadge}>
+                    <Text style={styles.adDimensionsText}>{currentAd.dimensions}</Text>
+                  </View>
+                </View>
+
+                <View style={[styles.adDetailBox, { backgroundColor: t.card }]}>
+                  <Text style={[styles.adDetailLabel, { color: t.textMuted }]}>Advertiser</Text>
+                  <Text style={[styles.adDetailValue, { color: t.text }]}>{currentAd.advertiser}</Text>
+                  
+                  <Text style={[styles.adDetailLabel, { color: t.textMuted, marginTop: 16 }]}>Campaign</Text>
+                  <Text style={[styles.adDetailValue, { color: t.text }]}>{currentAd.title}</Text>
+                  
+                  <Text style={[styles.adDetailLabel, { color: t.textMuted, marginTop: 16 }]}>Tenure</Text>
+                  <Text style={[styles.adDetailValue, { color: t.text }]}>{currentAd.tenure}</Text>
+
+                  <Text style={[styles.adDetailLabel, { color: t.textMuted, marginTop: 16 }]}>Payouts</Text>
+                  <Text style={[styles.adDetailValue, { color: '#22C55E' }]}>{currentAd.payout} <Text style={{fontSize: 14, color: t.textMuted, fontWeight: 'normal'}}>(Paid {currentAd.payoutSplit})</Text></Text>
+
+                  <Text style={[styles.adDetailLabel, { color: t.textMuted, marginTop: 16 }]}>Instructions</Text>
+                  <Text style={[styles.adDetailValue, { color: t.text, fontWeight: 'normal', lineHeight: 22 }]}>{currentAd.description}</Text>
+                </View>
+              </ScrollView>
+            </View>
+          </SafeAreaView>
+        </Modal>
+      )}
+
+      <ScrollView 
+        contentContainerStyle={styles.container}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={t.brand} colors={[t.brand]} />}
+      >
         <View style={styles.header}>
           <View style={styles.profileRow}>
             <View>
@@ -344,52 +451,95 @@ export default function Dashboard() {
           </TouchableOpacity>
         </View>
 
-        <View style={[styles.card, { backgroundColor: t.card }]}>
-          <Text style={[styles.cardTitle, { color: t.text }]}>Daily Photo Upload</Text>
-          {!photo && <Text style={[styles.timer, { color: t.brand }]}>8hr left</Text>}
-
-          <TouchableOpacity
-            style={[styles.uploadBox, { backgroundColor: t.surface }]}
-            onPress={() => photo && setShowFullPhoto(true)}
-            activeOpacity={photo ? 0.8 : 1}>
-            {photo ? (
-              <View style={{ width: '100%', height: '100%' }}>
-                <Image source={{ uri: photo }} style={styles.previewImage} />
-                <View style={styles.tapHint}>
-                  <MaterialCommunityIcons name="magnify-plus" size={16} color="#fff" />
-                  <Text style={styles.tapHintText}>Tap to view</Text>
+        {!currentAd ? (
+          <View style={[styles.card, { backgroundColor: t.card, borderColor: t.border, paddingVertical: 40, alignItems: 'center' }]}>
+            <MaterialCommunityIcons name="bullhorn-outline" size={48} color={t.textMuted} style={{ marginBottom: 16 }} />
+            <Text style={{ color: t.text, fontSize: 18, fontWeight: 'bold', marginBottom: 8 }}>No Active Campaign</Text>
+            <Text style={{ color: t.textMuted, fontSize: 14, textAlign: 'center', paddingHorizontal: 20 }}>You will be notified once a new campaign is assigned to your vehicle.</Text>
+          </View>
+        ) : (
+          <>
+            <TouchableOpacity 
+              style={[styles.adCard, { backgroundColor: t.card, borderColor: t.border }]} 
+              onPress={() => setShowAdModal(true)}
+              activeOpacity={0.8}
+            >
+              <View style={styles.adHeaderRow}>
+                <View style={{ flex: 1 }}>
+                  <Text style={[styles.adLabel, { color: t.textMuted }]}>Current Campaign</Text>
+                  <Text style={[styles.adAdvertiser, { color: t.text }]}>{currentAd.advertiser}</Text>
+                </View>
+                <View style={[styles.adBadge, { backgroundColor: '#22C55E' }]}>
+                  <Text style={[styles.adBadgeText, { color: '#FFF' }]}>Active</Text>
                 </View>
               </View>
-            ) : (
-              <>
-                <MaterialCommunityIcons name="camera-off" size={48} color={t.brand} />
-                <Text style={[styles.uploadStatus, { color: t.brand }]}>Today's photo not uploaded</Text>
-              </>
-            )}
-          </TouchableOpacity>
+              
+              {/* A small preview strip of the ad */}
+              <Image source={{ uri: currentAd.image }} style={styles.adPreviewStrip} resizeMode="cover" />
+              
+              <View style={[styles.adFooterRow, { justifyContent: 'space-between', alignItems: 'flex-end' }]}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, paddingBottom: 2 }}>
+                  <MaterialCommunityIcons name="calendar-range" size={16} color={t.textMuted} />
+                  <Text style={[styles.adTenure, { color: t.textMuted }]}>{currentAd.tenure}</Text>
+                </View>
+                <View style={{ alignItems: 'flex-end' }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                    <MaterialCommunityIcons name="cash-multiple" size={16} color="#22C55E" />
+                    <Text style={[styles.adTenure, { color: '#22C55E', fontWeight: 'bold' }]}>{currentAd.payout}</Text>
+                  </View>
+                  <Text style={{ fontSize: 11, color: t.textMuted, marginTop: 2 }}>Split: {currentAd.payoutSplit}</Text>
+                </View>
+              </View>
+            </TouchableOpacity>
 
-          {photo ? (
-            <View style={styles.successRow}>
-              <MaterialCommunityIcons name="check-circle" size={20} color="#22C55E" />
-              <Text style={[styles.successText, { color: '#22C55E' }]}>Uploaded successfully today!</Text>
+            <View style={[styles.card, { backgroundColor: t.card, borderColor: t.border }]}>
+              <Text style={[styles.cardTitle, { color: t.text }]}>Daily Photo Upload</Text>
+              {!photo && <Text style={[styles.timer, { color: t.brand }]}>8hr left</Text>}
+
+              <TouchableOpacity
+                style={[styles.uploadBox, { backgroundColor: t.inputBg, borderColor: t.border }]}
+                onPress={() => photo && setShowFullPhoto(true)}
+                activeOpacity={photo ? 0.8 : 1}>
+                {photo ? (
+                  <View style={{ width: '100%', height: '100%' }}>
+                    <Image source={{ uri: photo }} style={styles.previewImage} />
+                    <View style={styles.tapHint}>
+                      <MaterialCommunityIcons name="magnify-plus" size={16} color="#fff" />
+                      <Text style={styles.tapHintText}>Tap to view</Text>
+                    </View>
+                  </View>
+                ) : (
+                  <>
+                    <MaterialCommunityIcons name="camera-off" size={48} color={t.brand} />
+                    <Text style={[styles.uploadStatus, { color: t.brand }]}>Today's photo not uploaded</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+
+              {photo ? (
+                <View style={styles.successRow}>
+                  <MaterialCommunityIcons name="check-circle" size={20} color="#22C55E" />
+                  <Text style={[styles.successText, { color: '#22C55E' }]}>Uploaded successfully today!</Text>
+                </View>
+              ) : (
+                <Text style={[styles.uploadHint, { color: t.textMuted }]}>Please upload a clear photo of your rickshaw backside to keep earning today's rewards.</Text>
+              )}
+
+              {photo ? (
+                <TouchableOpacity style={styles.retakeSmallBtn} onPress={handleTakePhoto}>
+                  <Text style={[styles.retakeSmallText, { color: t.textMuted }]}>Retake photo</Text>
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity style={[styles.button, { backgroundColor: t.brand }]} onPress={handleTakePhoto}>
+                  <MaterialCommunityIcons name="camera" size={20} color="#fff" />
+                  <Text style={styles.buttonText}>Take photo now</Text>
+                </TouchableOpacity>
+              )}
             </View>
-          ) : (
-            <Text style={[styles.uploadHint, { color: t.textMuted }]}>Please upload a clear photo of your rickshaw backside to keep earning today's rewards.</Text>
-          )}
+          </>
+        )}
 
-          {photo ? (
-            <TouchableOpacity style={styles.retakeSmallBtn} onPress={handleTakePhoto}>
-              <Text style={[styles.retakeSmallText, { color: t.textMuted }]}>Retake photo</Text>
-            </TouchableOpacity>
-          ) : (
-            <TouchableOpacity style={[styles.button, { backgroundColor: t.brand }]} onPress={handleTakePhoto}>
-              <MaterialCommunityIcons name="camera" size={20} color="#fff" />
-              <Text style={styles.buttonText}>Take photo now</Text>
-            </TouchableOpacity>
-          )}
-        </View>
-
-        <View style={[styles.card, { backgroundColor: t.card, marginTop: 16 }]}>
+        <View style={[styles.card, { backgroundColor: t.card, borderColor: t.border, marginTop: 16 }]}>
           <Text style={[styles.cardTitle, { color: t.text, fontSize: 16, textAlign: 'left', marginBottom: 4 }]}>
             {today.toLocaleString('en-IN', { month: 'long', year: 'numeric' })}
           </Text>
@@ -444,7 +594,7 @@ export default function Dashboard() {
                   key={day} 
                   style={[
                     styles.heatmapCell,
-                    { backgroundColor: isFuture ? t.surface : uploaded ? '#22C55E' : '#EF444420' },
+                    { backgroundColor: isFuture ? t.inputBg : uploaded ? '#22C55E' : '#EF444420' },
                     isToday && { borderWidth: 2, borderColor: '#E05409' }, // Matches orange border in mockup
                   ]}
                   onPress={uploaded ? handlePress : undefined}
@@ -478,7 +628,7 @@ export default function Dashboard() {
               <Text style={[styles.legendText, { color: t.textMuted }]}>Missed</Text>
             </View>
             <View style={styles.legendItem}>
-              <View style={[styles.legendDot, { backgroundColor: t.surface, borderWidth: 1, borderColor: t.border }]} />
+              <View style={[styles.legendDot, { backgroundColor: t.inputBg, borderWidth: 1, borderColor: t.border }]} />
               <Text style={[styles.legendText, { color: t.textMuted }]}>Upcoming</Text>
             </View>
           </View>
@@ -499,10 +649,10 @@ const styles = StyleSheet.create({
   vehicleNo: { fontSize: 13 },
   bellBtn: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center' },
   bellDot: { position: 'absolute', top: 8, right: 8, width: 8, height: 8, borderRadius: 4 },
-  card: { borderRadius: 20, padding: 20 },
+  card: { borderRadius: 20, padding: 20, borderWidth: 1, elevation: 2, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 4 },
   cardTitle: { fontSize: 22, fontWeight: 'bold', textAlign: 'center', marginBottom: 4 },
   timer: { fontSize: 14, textAlign: 'center', marginBottom: 16, fontWeight: '500' },
-  uploadBox: { borderRadius: 16, height: 180, alignItems: 'center', justifyContent: 'center', marginBottom: 16, gap: 8, overflow: 'hidden' },
+  uploadBox: { borderRadius: 16, height: 180, alignItems: 'center', justifyContent: 'center', marginBottom: 16, gap: 8, overflow: 'hidden', borderWidth: 1.5, borderStyle: 'dashed' },
   previewImage: { width: '100%', height: '100%' },
   metaOverlay: { position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: 'rgba(0,0,0,0.65)', padding: 8 },
   metaText: { color: '#fff', fontSize: 10, marginBottom: 2 },
@@ -548,4 +698,27 @@ const styles = StyleSheet.create({
   captureInner: { width: 60, height: 60, borderRadius: 30, backgroundColor: '#fff', borderWidth: 2, borderColor: '#333' },
   cameraWatermarkTop: { position: 'absolute', top: 60, left: 0, right: 0, alignItems: 'center' },
   cameraWatermarkText: { color: '#E05409', fontSize: 12, fontWeight: 'bold', backgroundColor: 'rgba(0,0,0,0.5)', paddingHorizontal: 12, paddingVertical: 4, borderRadius: 8 },
+  
+  // Advertisement Card Styles
+  adCard: { borderRadius: 20, padding: 16, marginBottom: 16, borderWidth: 1, elevation: 2, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 4 },
+  adHeaderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 },
+  adLabel: { fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4, fontWeight: '600' },
+  adAdvertiser: { fontSize: 18, fontWeight: 'bold' },
+  adBadge: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12 },
+  adBadgeText: { fontSize: 11, fontWeight: 'bold' },
+  adPreviewStrip: { width: '100%', height: 48, borderRadius: 8, marginBottom: 14 },
+  adFooterRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  adTenure: { fontSize: 13, fontWeight: '500' },
+  
+  // Advertisement Modal Styles
+  adModalContent: { flex: 1, marginTop: 80, borderTopLeftRadius: 28, borderTopRightRadius: 28, padding: 24, paddingBottom: 40 },
+  adModalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 },
+  adModalTitle: { fontSize: 22, fontWeight: 'bold' },
+  adFullImageContainer: { width: '100%', aspectRatio: 4, borderRadius: 16, overflow: 'hidden', marginBottom: 24, backgroundColor: '#000' },
+  adFullImage: { width: '100%', height: '100%' },
+  adDimensionsBadge: { position: 'absolute', bottom: 10, right: 10, backgroundColor: 'rgba(0,0,0,0.65)', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8 },
+  adDimensionsText: { color: '#fff', fontSize: 12, fontWeight: 'bold' },
+  adDetailBox: { borderRadius: 20, padding: 24 },
+  adDetailLabel: { fontSize: 12, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 4, fontWeight: '600' },
+  adDetailValue: { fontSize: 16, fontWeight: 'bold' },
 });
